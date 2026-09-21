@@ -1,0 +1,22 @@
+{
+  "name": "kataras-jev",
+  "description": "Go client skill for the TypeSafe System One API.",
+  "owner": {
+    "name": "kataras",
+    "url": "https://github.com/kataras"
+  },
+  "plugins": [
+    {
+      "name": "jev",
+      "source": "./",
+      "skills": ["./skills/jev"],
+      "strict": false,
+      "version": "0.1.0",
+      "description": "Teaches coding agents to call the TypeSafe System One API with github.com/kataras/jev.",
+      "author": {
+        "name": "Gerasimos Maropoulos",
+        "url": "https://github.com/kataras"
+      }
+    }
+  ]
+}
