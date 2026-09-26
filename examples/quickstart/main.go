@@ -367,15 +367,7 @@ func (i commandItem) Title() string {
 	case "cancel":
 		return "❌ Cancel & Exit"
 	}
-	marker := "  "
-	if i.high {
-		marker = "🔹"
-	}
-	score := "    —"
-	if i.score > 0 {
-		score = fmt.Sprintf("%5.0f%%", i.score*100)
-	}
-	return fmt.Sprintf("%s %-44.44s %-14.14s %s", marker, i.cmd, i.key, score)
+	return i.cmd
 }
 func (i commandItem) Description() string {
 	if i.special == "new" {
@@ -641,20 +633,12 @@ type model struct {
 }
 
 func newList(items []commandItem) list.Model {
-	delegate := list.NewDefaultDelegate()
-	delegate.ShowDescription = false
-	delegate.SetSpacing(0)
-	delegate.Styles.NormalTitle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#BBBBBB"))
-	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("#FFD700"))
 	// Convert []commandItem to []list.Item
 	listItems := make([]list.Item, len(items))
 	for i, ci := range items {
 		listItems[i] = ci
 	}
-	l := list.New(listItems, delegate, 80, 24)
+	l := list.New(listItems, cmdDelegate{}, 80, 24)
 	l.Title = "📋 Pick a command  ↑/↓ move · enter run · esc quit"
 	l.SetFilteringEnabled(false)
 	l.SetShowFilter(false)
@@ -664,6 +648,73 @@ func newList(items []commandItem) list.Model {
 	l.SetShowHelp(false)
 	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 1, 2)
 	return l
+}
+
+var (
+	rowStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#BBBBBB"))
+	rowSubStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
+	rowSelStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFD700"))
+	rowSelSub   = lipgloss.NewStyle().Foreground(lipgloss.Color("#A7F3D0"))
+)
+
+// cmdDelegate renders a row over two lines so long commands stay readable.
+type cmdDelegate struct{}
+
+func (cmdDelegate) Height() int                         { return 2 }
+func (cmdDelegate) Spacing() int                        { return 0 }
+func (cmdDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
+
+func (cmdDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	it, ok := item.(commandItem)
+	if !ok {
+		return
+	}
+	if it.special == "spacer" {
+		fmt.Fprint(w, "\n")
+		return
+	}
+
+	head, sub := rowStyle, rowSubStyle
+	if index == m.Index() {
+		head, sub = rowSelStyle, rowSelSub
+	}
+
+	if it.special != "" {
+		fmt.Fprintf(w, "%s\n%s", head.Render("  "+it.Title()), sub.Render("     "+it.Description()))
+		return
+	}
+
+	width := max(m.Width()-8, 24)
+	score := "—"
+	if it.score > 0 {
+		score = fmt.Sprintf("%.0f%%", it.score*100)
+	}
+	marker := "  "
+	if it.high {
+		marker = "🔹"
+	}
+
+	first, rest := splitAt(it.cmd, width)
+	meta := it.key + "  " + score
+	second := meta
+	if rest != "" {
+		second, _ = splitAt(rest, max(width-len([]rune(meta))-3, 8))
+		second += "   " + meta
+	}
+	second, _ = splitAt(second, width)
+
+	fmt.Fprintf(w, "%s\n%s",
+		head.Render(" "+marker+" "+first),
+		sub.Render("     "+second))
+}
+
+// splitAt cuts s after n runes, returning the head and any remainder.
+func splitAt(s string, n int) (string, string) {
+	r := []rune(s)
+	if n <= 0 || len(r) <= n {
+		return s, ""
+	}
+	return string(r[:n]), string(r[n:])
 }
 
 // recommendedIndex returns the index of the jev-recommended command.
