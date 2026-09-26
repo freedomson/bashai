@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.typesafe.ai"
-	defaultModel   = "jev-latest"
+	defaultBaseURL = "http://localhost:11435"
+	defaultModel   = "kev"
 	defaultTimeout = 10 * time.Second
 
 	envAPIKey   = "TYPESAFE_API_KEY"
