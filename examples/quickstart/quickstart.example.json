@@ -1,0 +1,15 @@
+{
+  "max_turns": 3,
+  "model": "Qwen3.6-35B-A3B-Q4_K_M",
+  "url": "http://127.0.0.1:8080/v1/completions",
+  "jev_base_url": "http://localhost:11435",
+  "jev_model": "kev",
+  "timeout_seconds": 180,
+  "output_limit": 4000,
+  "history_limit": 1000,
+  "vim_mode": false,
+  "max_tokens": 1024,
+  "listen": "127.0.0.1:8770",
+  "mouse": false,
+  "host": ""
+}

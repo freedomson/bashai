@@ -79,6 +79,9 @@ type config struct {
 	HistoryLimit int    `json:"history_limit"`
 	VimMode      bool   `json:"vim_mode"`
 	MaxTokens    int    `json:"max_tokens"`
+	Listen       string `json:"listen"`
+	Mouse        bool   `json:"mouse"`
+	Host         string `json:"host"`
 }
 
 func defaultConfig() config {
@@ -92,6 +95,7 @@ func defaultConfig() config {
 		OutputLimit:  4000,
 		HistoryLimit: 1000,
 		MaxTokens:    1024,
+		Listen:       "127.0.0.1:8770",
 	}
 }
 
@@ -99,16 +103,12 @@ var cfg = defaultConfig()
 
 func (c config) timeout() time.Duration { return time.Duration(c.TimeoutSecs) * time.Second }
 
-// configPath honours JEV_CONFIG, else ~/.config/jev/quickstart.json.
+// configPath honours JEV_CONFIG, else quickstart.json in the working directory.
 func configPath() string {
 	if p := os.Getenv("JEV_CONFIG"); p != "" {
 		return p
 	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(dir, "jev", "quickstart.json")
+	return "quickstart.json"
 }
 
 // loadConfig overlays the config file onto the defaults.
@@ -146,8 +146,72 @@ func writeDefaultConfig(path string) error {
 	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
+// envHostVar overrides the detected host summary.
+const envHostVar = "JEV_HOST"
+
+// envFilePath honours JEV_ENV_FILE, else .env in the working directory.
+func envFilePath() string {
+	if p := os.Getenv("JEV_ENV_FILE"); p != "" {
+		return p
+	}
+	return ".env"
+}
+
+// loadEnvFile sets KEY=VALUE pairs that are not already in the environment.
+// Values are never logged: this file holds secrets such as TYPESAFE_API_KEY.
+func loadEnvFile(path string) (int, error) {
+	if path == "" {
+		return 0, nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	n := 0
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		// A real environment variable wins over the file.
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		if err := os.Setenv(key, val); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+func normalizeHost(v string) string {
+	if strings.HasPrefix(v, "Host: ") {
+		return v
+	}
+	return "Host: " + v
+}
+
 // hostContext is a one-line host summary so the model targets the right tools.
+// JEV_HOST wins over the config file, which wins over auto-detection.
 var hostContext = sync.OnceValue(func() string {
+	if v := strings.TrimSpace(os.Getenv(envHostVar)); v != "" {
+		return normalizeHost(v)
+	}
+	if v := strings.TrimSpace(cfg.Host); v != "" {
+		return normalizeHost(v)
+	}
 	parts := []string{runtime.GOOS + "/" + runtime.GOARCH}
 	if v := osVersion(); v != "" {
 		parts = append(parts, v)
@@ -289,11 +353,7 @@ JSON:
 	if !ok {
 		return nil, fmt.Errorf("no valid JSON in LLM response")
 	}
-	fmt.Printf("  LLM parsed (%d commands):\n", len(firstValid))
-	for name, cmd := range firstValid {
-		fmt.Printf("    %-15s %s\n", name, cmd)
-	}
-	return firstValid, nil
+	return dedupe(firstValid), nil
 }
 
 // extractFirstJSON finds the first valid JSON object in s.
@@ -354,7 +414,8 @@ type commandItem struct {
 	key     string
 	cmd     string
 	high    bool    // jev-highlighted
-	score   float64 // jev probability, 0 when unavailable
+	score   float64 // jev probability, meaningful only when rated
+	rated   bool    // true when jev returned a probability
 	special string  // "new" or "cancel" for special items
 }
 
@@ -509,72 +570,27 @@ func runLoop(ctx context.Context) {
 			continue
 		}
 
-		// Sort keys for deterministic menu.
-		keys := make([]string, 0, len(commands))
-		for k := range commands {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		// Rank with jev, then build the menu from the shared result.
+		c := classify(ctx, query, history, commands, true)
+		ranked, recommended := rank(commands, c)
 
-		// Build items.
-		items := make([]commandItem, len(keys))
-		for i, k := range keys {
-			items[i] = commandItem{key: k, cmd: commands[k], high: false}
+		if !c.OK {
+			fmt.Println(rowSubStyle.Render("  no scores: " + c.Reason))
 		}
-
-		// Classify with jev if available.
-		bestChoice := ""
-		var probabilities map[string]float64
-		if os.Getenv("TYPESAFE_API_KEY") != "" {
-			fmt.Println("\n🎯 jev classification")
-			jevClient, err := jev.New(
-				jev.WithTimeout(20*time.Second),
-				jev.WithBaseURL(cfg.JevBaseURL),
-				jev.WithModel(cfg.JevModel),
-			)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "jev init failed: %v (continuing without classification)\n", err)
-			} else {
-				resp, err := jevClient.Classify(ctx, map[string]any{
-					"host":           hostContext(),
-					"query":          query,
-					"recent_history": history,
-				},
-					"Which bash command best matches the user's intent?",
-					commands,
-				)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "jev classify failed: %v\n", err)
-				} else {
-					fmt.Printf("  model=%s  intent=%s  confidence=%.3f\n", jevClient.Model(), resp.Choice, resp.Confidence)
-					bestChoice = resp.Choice
-					probabilities = resp.Probabilities
-				}
-			}
+		fmt.Printf("  LLM parsed (%d commands):\n", len(ranked))
+		for _, s := range ranked {
+			fmt.Printf("    %-15s %s\n", s.Key, s.Command)
 		}
 
-		// Highlight the highest-rated command, falling back to jev's
-		// choice and then the first entry when there are no probabilities.
-		best := -1
-		for i := range items {
-			if items[i].special != "" {
-				continue
+		items := make([]commandItem, len(ranked))
+		for i, s := range ranked {
+			items[i] = commandItem{
+				key:   s.Key,
+				cmd:   s.Command,
+				score: scoreOf(s),
+				rated: s.Score != nil,
+				high:  s.Key == recommended,
 			}
-			items[i].score = probabilities[items[i].key]
-			if best < 0 || items[i].score > items[best].score {
-				best = i
-			}
-		}
-		if best >= 0 && items[best].score == 0 && bestChoice != "" {
-			for i := range items {
-				if items[i].special == "" && items[i].key == bestChoice {
-					best = i
-					break
-				}
-			}
-		}
-		if best >= 0 {
-			items[best].high = true
 		}
 
 		// Add special action items at the end.
@@ -686,7 +702,7 @@ func (cmdDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) 
 
 	width := max(m.Width()-8, 24)
 	score := "—"
-	if it.score > 0 {
+	if it.rated {
 		score = fmt.Sprintf("%.0f%%", it.score*100)
 	}
 	marker := "  "
@@ -793,14 +809,18 @@ func (m model) View() string {
 // showPicker opens the TUI list and returns the selected item, or nil if cancelled.
 func showPicker(items []commandItem) *commandItem {
 	l := newList(items)
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	// Mouse capture blocks terminal text selection, so it is opt-in.
+	if cfg.Mouse {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
 	p := tea.NewProgram(
 		model{
 			items:       items,
 			list:        l,
 			recommended: recommendedIndex(items),
 		},
-		tea.WithAltScreen(),
-		tea.WithMouseAllMotion(),
+		opts...,
 	)
 
 	finalModel, err := p.Run()
@@ -813,9 +833,259 @@ func showPicker(items []commandItem) *commandItem {
 	return m.selected
 }
 
+// suggestion is one ranked command, as returned by the HTTP endpoint.
+// Score is nil when jev did not rate the commands, which is distinct from 0.
+type suggestion struct {
+	Key     string   `json:"key"`
+	Command string   `json:"command"`
+	Score   *float64 `json:"score,omitempty"`
+}
+
+// classification carries jev's verdict plus why it is missing, if it is.
+type classification struct {
+	Choice        string
+	Probabilities map[string]float64
+	OK            bool
+	Reason        string
+}
+
+// classify asks jev to rate the commands. It degrades to no ranking when the
+// API key is absent or the call fails. verbose prints progress for the CLI.
+func classify(ctx context.Context, query string, history []turn, commands map[string]string, verbose bool) classification {
+	if os.Getenv("TYPESAFE_API_KEY") == "" {
+		return classification{Reason: "TYPESAFE_API_KEY is not set, commands are unranked"}
+	}
+	if verbose {
+		fmt.Println("\n🎯 jev classification")
+	}
+	jevClient, err := jev.New(
+		jev.WithTimeout(20*time.Second),
+		jev.WithBaseURL(cfg.JevBaseURL),
+		jev.WithModel(cfg.JevModel),
+	)
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "jev init failed: %v (continuing without classification)\n", err)
+		}
+		return classification{Reason: "jev init failed: " + err.Error()}
+	}
+	resp, err := jevClient.Classify(ctx, map[string]any{
+		"host":           hostContext(),
+		"query":          query,
+		"recent_history": history,
+	},
+		"Which bash command best matches the user's intent?",
+		commands,
+	)
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "jev classify failed: %v\n", err)
+		}
+		return classification{Reason: "jev classify failed: " + err.Error()}
+	}
+	if verbose {
+		fmt.Printf("  model=%s  intent=%s  confidence=%.3f\n", jevClient.Model(), resp.Choice, resp.Confidence)
+	}
+	return classification{Choice: resp.Choice, Probabilities: resp.Probabilities, OK: true}
+}
+
+// rank orders commands by key and returns the recommended one: highest score,
+// else jev's choice, else the first entry.
+func rank(commands map[string]string, c classification) ([]suggestion, string) {
+	keys := make([]string, 0, len(commands))
+	for k := range commands {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make([]suggestion, len(keys))
+	best := -1
+	for i, k := range keys {
+		out[i] = suggestion{Key: k, Command: commands[k]}
+		if c.OK {
+			score := c.Probabilities[k]
+			out[i].Score = &score
+		}
+		if best < 0 || scoreOf(out[i]) > scoreOf(out[best]) {
+			best = i
+		}
+	}
+	if best >= 0 && scoreOf(out[best]) == 0 && c.Choice != "" {
+		for i, s := range out {
+			if s.Key == c.Choice {
+				best = i
+				break
+			}
+		}
+	}
+	if best < 0 {
+		return out, ""
+	}
+	return out, out[best].Key
+}
+
+func scoreOf(s suggestion) float64 {
+	if s.Score == nil {
+		return 0
+	}
+	return *s.Score
+}
+
+// dedupe drops entries whose command repeats one already kept, since the
+// model often emits the same command under two names.
+func dedupe(commands map[string]string) map[string]string {
+	keys := make([]string, 0, len(commands))
+	for k := range commands {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	seen := make(map[string]bool, len(keys))
+	out := make(map[string]string, len(keys))
+	for _, k := range keys {
+		norm := strings.Join(strings.Fields(commands[k]), " ")
+		if seen[norm] {
+			continue
+		}
+		seen[norm] = true
+		out[k] = commands[k]
+	}
+	return out
+}
+
+// --- HTTP endpoint ----------------------------------------------------
+
+type suggestResponse struct {
+	Query       string       `json:"query"`
+	Host        string       `json:"host"`
+	Recommended string       `json:"recommended"`
+	Classified  bool         `json:"classified"`
+	Note        string       `json:"note,omitempty"`
+	Commands    []suggestion `json:"commands"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	enc.Encode(v)
+}
+
+// readQueryParam accepts ?q=, a JSON body, or a plain-text body.
+func readQueryParam(r *http.Request) (string, error) {
+	if q := r.URL.Query().Get("q"); strings.TrimSpace(q) != "" {
+		return strings.TrimSpace(q), nil
+	}
+	if r.Method != http.MethodPost {
+		return "", errors.New(`query is required: use ?q=... or POST a body`)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<10))
+	if err != nil {
+		return "", errors.New("could not read request body")
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return "", errors.New("request body is empty")
+	}
+	// A JSON object is treated as {"query": "..."}; anything else is the query.
+	if strings.HasPrefix(trimmed, "{") {
+		var payload struct {
+			Query string `json:"query"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+			return "", errors.New("invalid JSON body")
+		}
+		if strings.TrimSpace(payload.Query) == "" {
+			return "", errors.New(`JSON body needs a non-empty "query" field`)
+		}
+		return strings.TrimSpace(payload.Query), nil
+	}
+	return trimmed, nil
+}
+
+// handleSuggest returns ranked command suggestions. It never executes them.
+func handleSuggest(w http.ResponseWriter, r *http.Request) {
+	query, err := readQueryParam(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": err.Error(),
+			"hint":  `spaces must be encoded: curl --get --data-urlencode "q=top cpu processes" http://` + cfg.Listen + `/commands`,
+		})
+		return
+	}
+
+	commands, err := fetchCommands(r.Context(), query, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "http: %v\n", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "command generation failed"})
+		return
+	}
+
+	c := classify(r.Context(), query, nil, commands, false)
+	ranked, recommended := rank(commands, c)
+
+	writeJSON(w, http.StatusOK, suggestResponse{
+		Query:       query,
+		Host:        hostContext(),
+		Recommended: recommended,
+		Classified:  c.OK,
+		Note:        c.Reason,
+		Commands:    ranked,
+	})
+}
+
+// handleUsage documents the endpoint so it can be discovered from the browser.
+func handleUsage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	base := "http://" + cfg.Listen
+	writeJSON(w, http.StatusOK, map[string]any{
+		"endpoint": base + "/commands",
+		"usage": []string{
+			`curl --get --data-urlencode "q=top cpu processes" ` + base + `/commands`,
+			`curl -d '{"query":"top cpu processes"}' ` + base + `/commands`,
+			`curl -d 'top cpu processes' ` + base + `/commands`,
+		},
+		"notes": []string{
+			"Commands are returned, never executed.",
+			"score is omitted unless TYPESAFE_API_KEY is set and jev is reachable.",
+		},
+	})
+}
+
+// serve runs the suggestion endpoint alongside the CLI. It is bound to
+// loopback by default because it generates shell commands on request.
+func serve(addr string) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/commands", handleSuggest)
+	mux.HandleFunc("/", handleUsage)
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      cfg.timeout() + 30*time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		fmt.Fprintln(os.Stderr, errStyle.Render("server: "+err.Error()))
+	}
+}
+
 // --- Main -------------------------------------------------------------
 
 func main() {
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
+
+	envPath := envFilePath()
+	loadedVars, envErr := loadEnvFile(envPath)
+	if envErr != nil {
+		fmt.Fprintln(os.Stderr, errStyle.Render("env: "+envErr.Error()))
+	}
+
 	loaded, path, err := loadConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, errStyle.Render("config: "+err.Error()))
@@ -823,11 +1093,11 @@ func main() {
 		cfg = loaded
 	}
 
-	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#808080"))
-	fmt.Println(dim.Render(hostContext()))
+	firstRun := false
 	if path != "" {
 		note := "config"
 		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+			firstRun = true
 			if writeErr := writeDefaultConfig(path); writeErr != nil {
 				note = "config (defaults, not written: " + writeErr.Error() + ")"
 			} else {
@@ -838,5 +1108,30 @@ func main() {
 			note, path, cfg.MaxTurns, cfg.Model, cfg.JevBaseURL, cfg.JevModel)))
 	}
 
+	fmt.Println(dim.Render(hostContext()))
+
+	// Names only: never print values read from the env file.
+	if loadedVars > 0 {
+		fmt.Println(dim.Render(fmt.Sprintf("env: loaded %d variable(s) from %s", loadedVars, envPath)))
+	} else if os.Getenv("TYPESAFE_API_KEY") == "" {
+		fmt.Println(dim.Render(fmt.Sprintf("env: no TYPESAFE_API_KEY; put it in %s to enable scoring", envPath)))
+	}
+
+	if firstRun {
+		printHostHelp(dim)
+	}
+
+	if cfg.Listen != "" {
+		go serve(cfg.Listen)
+		fmt.Println(dim.Render(fmt.Sprintf("endpoint: http://%s/commands?q=...", cfg.Listen)))
+	}
+
 	runLoop(context.Background())
+}
+
+// printHostHelp shows how to pin the host summary on a VM or container.
+func printHostHelp(dim lipgloss.Style) {
+	fmt.Println(dim.Render("host: set " + envHostVar + ` or "host" in the config to pin this on a VM`))
+	fmt.Println(dim.Render(`  linux:   export JEV_HOST="linux/$(uname -m), $(. /etc/os-release; echo $PRETTY_NAME), GNU userland, shell $(basename $SHELL)"`))
+	fmt.Println(dim.Render(`  windows: $env:JEV_HOST = "windows/$env:PROCESSOR_ARCHITECTURE, $((Get-CimInstance Win32_OperatingSystem).Caption), PowerShell"`))
 }
