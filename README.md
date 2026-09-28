@@ -51,7 +51,7 @@ Drafting commands and choosing between them are different jobs.
 
 A general LLM is good at the first and unreliable at the second: ask it to also
 rank its own suggestions and you get prose, or a confident pick with no numbers
-behind it. So `bashai` splits the work. The LLM proposes; [jev](https://pkg.go.dev/github.com/kataras/jev)
+behind it. So `bashai` splits the work. The LLM proposes; [bashai](https://github.com/freedomson/bashai)
 sends the candidates to a decision model that returns a probability for each one.
 That is what fills the percentage column, and what decides which row starts
 selected.
@@ -279,7 +279,7 @@ Missing fields keep their defaults. A copy lives in
 
 `bashai` is built on `github.com/kataras/jev`, a Go client for the TypeSafe
 System One API. If you want the classification layer in your own program, the API
-docs are on [pkg.go.dev](https://pkg.go.dev/github.com/kataras/jev) and there is
+docs are on [pkg.go.dev](https://github.com/freedomson/bashai) and there is
 an agent skill in [skills/jev/SKILL.md](skills/jev/SKILL.md).
 
 The short version — send a state and named questions, get a probability for each:
