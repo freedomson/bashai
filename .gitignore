@@ -5,6 +5,6 @@
 /dist/
 .env
 .env.*
-/quickstart.json
+/bashai.json
 .vscode
 .DS_Store

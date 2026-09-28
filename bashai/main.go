@@ -1,9 +1,9 @@
-// Command quickstart queries a local LLM for a dynamic command list based
-// on the user query, then uses jev to classify which command best matches.
-// A TUI list (arrow keys, mouse, colors) picks the command to run.
-// The query prompt keeps persistent history; set JEV_VIM=1 for vim keybindings.
+// Command bashai turns a plain-English question into a short list of shell
+// commands: a local LLM drafts the candidates, jev rates them, and a TUI list
+// picks the one to run. It also serves the same suggestions over HTTP.
+// The query prompt keeps persistent history; set BASHAI_VIM=1 for vim keybindings.
 //
-//	TYPESAFE_API_KEY=... go run .
+//	go run ./bashai
 package main
 
 import (
@@ -103,12 +103,12 @@ var cfg = defaultConfig()
 
 func (c config) timeout() time.Duration { return time.Duration(c.TimeoutSecs) * time.Second }
 
-// configPath honours JEV_CONFIG, else quickstart.json in the working directory.
+// configPath honours BASHAI_CONFIG, else bashai.json in the working directory.
 func configPath() string {
-	if p := os.Getenv("JEV_CONFIG"); p != "" {
+	if p := os.Getenv("BASHAI_CONFIG"); p != "" {
 		return p
 	}
-	return "quickstart.json"
+	return "bashai.json"
 }
 
 // loadConfig overlays the config file onto the defaults.
@@ -147,11 +147,11 @@ func writeDefaultConfig(path string) error {
 }
 
 // envHostVar overrides the detected host summary.
-const envHostVar = "JEV_HOST"
+const envHostVar = "BASHAI_HOST"
 
-// envFilePath honours JEV_ENV_FILE, else .env in the working directory.
+// envFilePath honours BASHAI_ENV_FILE, else .env in the working directory.
 func envFilePath() string {
-	if p := os.Getenv("JEV_ENV_FILE"); p != "" {
+	if p := os.Getenv("BASHAI_ENV_FILE"); p != "" {
 		return p
 	}
 	return ".env"
@@ -204,7 +204,7 @@ func normalizeHost(v string) string {
 }
 
 // hostContext is a one-line host summary so the model targets the right tools.
-// JEV_HOST wins over the config file, which wins over auto-detection.
+// BASHAI_HOST wins over the config file, which wins over auto-detection.
 var hostContext = sync.OnceValue(func() string {
 	if v := strings.TrimSpace(os.Getenv(envHostVar)); v != "" {
 		return normalizeHost(v)
@@ -508,13 +508,13 @@ func runShell(cmdline string) (string, string) {
 }
 
 // newPrompt builds the query prompt with history and line editing.
-// Arrow keys browse history; set JEV_VIM=1 for vim keybindings, where
+// Arrow keys browse history; set BASHAI_VIM=1 for vim keybindings, where
 // Esc then k/j browses history instead (vim mode swallows arrow escapes).
 func newPrompt() (*readline.Instance, error) {
-	historyFile := filepath.Join(os.TempDir(), "jev-quickstart-history")
+	historyFile := filepath.Join(os.TempDir(), "bashai-history")
 	if dir, err := os.UserCacheDir(); err == nil {
-		if err := os.MkdirAll(filepath.Join(dir, "jev"), 0o700); err == nil {
-			historyFile = filepath.Join(dir, "jev", "quickstart-history")
+		if err := os.MkdirAll(filepath.Join(dir, "bashai"), 0o700); err == nil {
+			historyFile = filepath.Join(dir, "bashai", "history")
 		}
 	}
 	return readline.NewEx(&readline.Config{
@@ -522,7 +522,7 @@ func newPrompt() (*readline.Instance, error) {
 		HistoryFile:       historyFile,
 		HistoryLimit:      cfg.HistoryLimit,
 		HistorySearchFold: true,
-		VimMode:           cfg.VimMode || os.Getenv("JEV_VIM") == "1",
+		VimMode:           cfg.VimMode || os.Getenv("BASHAI_VIM") == "1",
 		InterruptPrompt:   "^C",
 		EOFPrompt:         "exit",
 	})
@@ -1132,6 +1132,6 @@ func main() {
 // printHostHelp shows how to pin the host summary on a VM or container.
 func printHostHelp(dim lipgloss.Style) {
 	fmt.Println(dim.Render("host: set " + envHostVar + ` or "host" in the config to pin this on a VM`))
-	fmt.Println(dim.Render(`  linux:   export JEV_HOST="linux/$(uname -m), $(. /etc/os-release; echo $PRETTY_NAME), GNU userland, shell $(basename $SHELL)"`))
-	fmt.Println(dim.Render(`  windows: $env:JEV_HOST = "windows/$env:PROCESSOR_ARCHITECTURE, $((Get-CimInstance Win32_OperatingSystem).Caption), PowerShell"`))
+	fmt.Println(dim.Render(`  linux:   export BASHAI_HOST="linux/$(uname -m), $(. /etc/os-release; echo $PRETTY_NAME), GNU userland, shell $(basename $SHELL)"`))
+	fmt.Println(dim.Render(`  windows: $env:BASHAI_HOST = "windows/$env:PROCESSOR_ARCHITECTURE, $((Get-CimInstance Win32_OperatingSystem).Caption), PowerShell"`))
 }

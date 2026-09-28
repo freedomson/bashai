@@ -225,4 +225,4 @@ These are not in the module. Do not write them, and do not tell the user they ex
 - One HTTP call per question when the questions share a state
 - A `time.Sleep` or a hand-written limiter around calls; use `WithRateLimit` or `WithRateLimiter`
 
-Full signatures are in [api.md](api.md). A runnable program is `examples/quickstart` in the module repo.
+Full signatures are in [api.md](api.md). A runnable program is `bashai` in the module repo.

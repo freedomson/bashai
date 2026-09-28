@@ -1,243 +1,296 @@
-# jev
+# bashai
 
-[![build status](https://img.shields.io/github/actions/workflow/status/kataras/jev/ci.yml?style=for-the-badge)](https://github.com/kataras/jev/actions) [![report card](https://img.shields.io/badge/report%20card-a%2B-ff3333.svg?style=for-the-badge)](https://goreportcard.com/report/github.com/kataras/jev) [![godocs](https://img.shields.io/badge/go-%20docs-488AC7.svg?style=for-the-badge)](https://pkg.go.dev/github.com/kataras/jev)
+Ask for a shell command in plain English. A local LLM drafts a few candidates, a
+decision model rates them, and you pick one from a list and run it.
 
-A Go client for the [TypeSafe](https://typesafe.ai) System One API and its model, Jev.
+Nothing runs on its own. `bashai` only ever *suggests*; you choose what executes.
 
-Jev does not write text. You send a state (a string, or JSON such as a ticket, a log, or the current state of a program) and one or more named questions. The call returns a typed answer and a probability for every question. Adding questions to the same call does not add a round trip.
+```
+query: check free disk space
+⚡ fetching dynamic command list from local LLM
 
-This module is not affiliated with TypeSafe AI. The official clients are the [JavaScript SDK](https://github.com/typesafe-ai/typesafe-sdk-js) and the [Python SDK](https://github.com/typesafe-ai/typesafe-sdk-python). The HTTP contract is the [System One API](https://docs.typesafe.ai/api).
+🎯 jev classification
+  model=kev  intent=disk_usage  confidence=0.214
+  LLM parsed (3 commands):
+    disk_space      df -hT --type=apfs
+    disk_usage      df -h
+    free_disk       df -h | grep -E '^Filesystem|tmpfs' | tail
+```
+
+```
+   📋 Pick a command  ↑/↓ move · enter run · esc quit
+
+    df -hT --type=apfs
+     disk_space  13%
+ 🔹 df -h
+     disk_usage  48%
+    df -h | grep -E '^Filesystem|tmpfs' | tail
+     free_disk  40%
+
+ ➕ Ask Another Question
+     Return to query input
+ ❌ Cancel & Exit
+     Exit the program
+```
+
+`🔹` marks the highest-rated command and is pre-selected, so pressing Enter runs
+it. The percentages come from the decision model. Press Enter:
+
+```
+▶ df -h /
+────────────────────────────────────────────────────────────
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   926Gi    12Gi   467Gi     3%    459k  4.3G    0%   /
+────────────────────────────────────────────────────────────
+✔ done
+```
+
+## Why two models
+
+Drafting commands and choosing between them are different jobs.
+
+A general LLM is good at the first and unreliable at the second: ask it to also
+rank its own suggestions and you get prose, or a confident pick with no numbers
+behind it. So `bashai` splits the work. The LLM proposes; [jev](https://pkg.go.dev/github.com/kataras/jev)
+sends the candidates to a decision model that returns a probability for each one.
+That is what fills the percentage column, and what decides which row starts
+selected.
+
+The decision model is optional. Without it you still get the list, just unranked.
 
 ## Install
 
-Go 1.27 or newer. The only dependency is `golang.org/x/time/rate`.
+Go 1.27 or newer.
 
 ```sh
-go get github.com/kataras/jev
+git clone https://github.com/kataras/jev
+cd jev
+go run ./bashai
 ```
 
-Please star this open source project to attract more developers so that together we can improve it even more!
+To build a binary, send it to `bin/` — `go build ./bashai` would try to write a
+file named `bashai` over the source directory.
 
-## Questions
-
-| Question | You provide | You get back |
-| --- | --- | --- |
-| Noul | A yes/no question | Probability of yes, from 0 to 1 |
-| Choice | Named options, up to 255 | The picked option, a probability for each option, and a confidence |
-| Score | An ordered list of levels, up to 10 | A position on that list (it can fall between levels), a probability for each level, and a confidence |
-
-Question names are yours. They come back as the answer keys. They are not part of the prompt.
-
-`jev-latest` is the default model, and that alias moves. Set `WithModel("jev-1.13.0")` when a later run has to hit the same model.
-
-## Usage
-
-```go
-client, err := jev.New() // reads TYPESAFE_API_KEY
-resp, err := client.SystemOne(ctx, jev.Request{
-    State: "I was charged twice. Please fix this ASAP.",
-    Questions: jev.Questions{
-        "billing": jev.Noul{Instructions: "Is this ticket about billing?"},
-        "team": jev.Choice{
-            Instructions: "Which team should handle this?",
-            Criteria: map[string]any{
-                "billing":   "Payments, invoices, refunds",
-                "technical": nil, // null means the label has no description
-            },
-        },
-        "urgency": jev.Score{
-            Instructions: "How urgent is this ticket?",
-            Criteria:     []string{"can wait", "this week", "today"},
-        },
-    },
-})
-
-billing, _ := resp.Noul("billing")
-team, _ := resp.Choice("team")
-urgency, _ := resp.Score("urgency")
+```sh
+go build -o bin/bashai ./bashai
 ```
 
-`SystemOneAs` decodes the same JSON into a struct. It is a generic method, which is why this module requires Go 1.27. JSON names are case-sensitive.
+## Setup with Ollama
 
-```go
-type ticket struct {
-    Model string `json:"model"`
-    Answers struct {
-        Billing struct {
-            Noul float64 `json:"noul"`
-        } `json:"billing"`
-    } `json:"answers"`
+[Ollama](https://ollama.com) serves the drafting model. Any instruct model works;
+smaller ones are faster and usually fine, since the output is a short JSON object.
+
+```sh
+ollama serve
+ollama pull qwen2.5-coder:7b
+```
+
+Ollama exposes an OpenAI-compatible endpoint on port 11434. Point `bashai` at it
+in `bashai.json`:
+
+```json
+{
+  "url": "http://127.0.0.1:11434/v1/completions",
+  "model": "qwen2.5-coder:7b"
 }
-
-out, err := client.SystemOneAs[ticket](ctx, req)
 ```
 
-A full program lives in [examples/quickstart](examples/quickstart/main.go).
+Run `go run ./bashai` and the file is created for you on first start with every
+field at its default, so you only need to edit the two lines above.
 
-## One question
+That alone is enough to use `bashai`. Commands appear without percentages, the
+first one is pre-selected, and the reason is stated rather than left as a silent
+zero:
 
-`Noul`, `Choice`, and `Score` each send one question named `answer` through `SystemOne`. `Classify` is `Choice` with the question and the options as separate arguments. `Rate` is `Score` with the levels as a list. The `As` methods call `SystemOneAs`. In that JSON the question name is `answer`.
-
-```go
-yes, err := client.Noul(ctx, ticket, "Is this about billing?")
-
-team, err := client.Classify(ctx, ticket, "Which team?", map[string]any{
-    "billing":   "Payments, invoices, refunds",
-    "technical": nil,
-})
-
-urgency, err := client.Rate(ctx, ticket, "How urgent?", []string{"can wait", "this week", "today"})
+```
+no scores: TYPESAFE_API_KEY is not set, commands are unranked
 ```
 
-Several questions about the same state still belong in one `SystemOne` call.
+## Adding the decision model
 
-List the models on the account with `ListModels`. The list includes the `jev-latest` alias.
+The ranking comes from a jev-compatible server — Ollay — serving a decision model
+such as `kev` on port 11435. Start it, then tell `bashai` where it is:
 
-```go
-models, err := client.ListModels(ctx)
+```json
+{
+  "jev_base_url": "http://localhost:11435",
+  "jev_model": "kev"
+}
 ```
+
+The jev client always sends an API key, including to a local server, so set one:
+
+```sh
+echo 'TYPESAFE_API_KEY=local' > .env
+chmod 600 .env
+```
+
+`.env` is read from the working directory and is already in `.gitignore`. A real
+environment variable wins over the file, so `export TYPESAFE_API_KEY=...` also
+works. Values are never printed — the banner reports only a count:
+
+```
+env: loaded 1 variable(s) from .env
+```
+
+With both servers up, the percentages appear and the best-rated command is
+pre-selected.
+
+## Talking to it over HTTP
+
+The same suggestions are served on `127.0.0.1:8770` while the CLI runs. Spaces
+must be encoded in a URL, so the friendliest form sends the query as the body:
+
+```sh
+curl -d 'show me what is using the most disk space' http://127.0.0.1:8770/commands
+```
+
+```json
+{
+  "query": "show me what is using the most disk space",
+  "host": "Host: darwin/arm64, macOS 26.6.2, BSD userland, shell zsh",
+  "recommended": "disk_space",
+  "classified": true,
+  "commands": [
+    {
+      "key": "disk_space",
+      "command": "df -h",
+      "score": 0.449
+    },
+    {
+      "key": "disk_usage",
+      "command": "du -ah --max-depth=1 / | sort -rh | head -n 20",
+      "score": 0.2293
+    },
+    {
+      "key": "du_top",
+      "command": "du -ah | sort -rh | head -n 20",
+      "score": 0.3217
+    }
+  ]
+}
+```
+
+Three call styles are accepted:
+
+```sh
+curl --get --data-urlencode "q=which processes use the most memory" http://127.0.0.1:8770/commands
+curl -d '{"query":"which processes use the most memory"}'              http://127.0.0.1:8770/commands
+curl -d 'which processes use the most memory'                          http://127.0.0.1:8770/commands
+```
+
+`GET /` returns the same list of examples. `score` is omitted, and `classified`
+is `false`, whenever the decision model was not consulted — that is deliberate,
+so an unranked command is never mistaken for one rated zero.
+
+The endpoint returns commands and never runs them. It binds to loopback because
+its output is model-generated text that becomes shell input if a caller pipes it
+somewhere. There is no authentication, so think before changing `listen`.
+
+## The session remembers
+
+Each turn carries the last few queries, the command you ran and its output into
+the next request, so follow-ups work:
+
+```
+query: now sort them by size
+🧵 carrying 2 earlier turn(s) as context
+```
+
+`max_turns` controls how many turns are replayed; `0` disables it. Captured
+output is trimmed to `output_limit` bytes.
+
+Command output is untrusted input being fed back to a model. It is fenced and
+labelled as inert data in the prompt, which reduces the risk of a crafted
+filename or log line steering the next suggestion, but does not remove it. The
+picker is the safeguard: read the command before you press Enter.
+
+## Telling it about the host
+
+The first line of every prompt describes the machine, so the model suggests
+`du -d 1` on macOS rather than GNU's `du --max-depth=1`:
+
+```
+Host: darwin/arm64, macOS 26.6.2, BSD userland, shell zsh
+```
+
+This is detected automatically. When you are driving a remote box, pin it with
+`BASHAI_HOST`, which wins over both the config file and detection:
+
+```sh
+# linux
+export BASHAI_HOST="linux/$(uname -m), $(. /etc/os-release; echo $PRETTY_NAME), GNU userland, shell $(basename $SHELL)"
+```
+
+```powershell
+# windows, PowerShell
+$env:BASHAI_HOST = "windows/$env:PROCESSOR_ARCHITECTURE, $((Get-CimInstance Win32_OperatingSystem).Caption), PowerShell"
+```
+
+`bashai` prints both lines on first run.
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` | Move |
+| `Enter` | Run the selected command |
+| `Esc`, `q` | Quit |
+
+At the query prompt, `↑`/`↓` browse history, which persists between sessions, and
+`Ctrl+R` searches it. Set `"vim_mode": true` for vim keybindings; there, arrow
+keys cannot reach history because readline consumes the escape, so use `Esc` then
+`k`/`j`.
+
+Mouse support is off by default so you can select text in the terminal. Turn it
+on with `"mouse": true`.
 
 ## Configuration
 
-Explicit options win over environment variables. A blank environment value is ignored.
+`bashai.json` in the working directory, or wherever `BASHAI_CONFIG` points.
+Missing fields keep their defaults. A copy lives in
+[bashai/bashai.example.json](bashai/bashai.example.json).
 
-| Option | Environment | Default |
+| Field | Default | What it does |
 | --- | --- | --- |
-| `WithAPIKey` | `TYPESAFE_API_KEY` | required |
-| `WithBaseURL` | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` |
-| `WithModel` | `TYPESAFE_DEFAULT_MODEL` | `jev-latest` |
-| `WithTimeout` | | 10s per attempt |
-| `WithRetry` | | 2 retries, 500ms to 5s backoff |
-| `WithRateLimit` | | 1,200 requests/min, 250,000 tokens/s |
-| `WithRateLimiter` | | the limiter `WithRateLimit` builds |
-| `WithLogger` | `TYPESAFE_LOG_LEVEL` | no logging |
-| `WithHTTPClient` | | a client that does not follow redirects |
-| `WithHeader` | | |
+| `url` | `http://127.0.0.1:8080/v1/completions` | Drafting model endpoint |
+| `model` | `Qwen3.6-35B-A3B-Q4_K_M` | Drafting model name |
+| `jev_base_url` | `http://localhost:11435` | Decision model server |
+| `jev_model` | `kev` | Decision model name |
+| `max_turns` | `3` | Turns of context replayed |
+| `timeout_seconds` | `180` | Per request, not per session |
+| `output_limit` | `4000` | Bytes of command output kept |
+| `history_limit` | `1000` | Query history entries |
+| `max_tokens` | `1024` | Drafting model budget |
+| `listen` | `127.0.0.1:8770` | HTTP endpoint; `""` disables |
+| `mouse` | `false` | Mouse capture in the picker |
+| `vim_mode` | `false` | Vim keybindings at the prompt |
+| `host` | `""` | Override the host line |
 
-The same options can be passed to one call. They override the client for that call only. `WithRateLimit` is the exception: it belongs to `New`, because a limiter built for one call starts with a full budget and paces nothing. For one call, pass `WithRateLimiter` with a limiter you own, or `nil` to skip pacing.
-
-`WithRetry` replaces the whole policy. Copy `DefaultRetryPolicy()` and edit the copy. A zero `RetryPolicy` retries nothing, because its status list is empty.
-
-## Rate limits
-
-The API limits each account to [1,200 requests per minute and 250,000 input tokens per second](https://docs.typesafe.ai/models#current-models). A request over either limit is a 429. Retrying after a 429 works, but it costs a round trip and a backoff wait each time. The client stays under the limit instead: every attempt, retries included, first waits on a token bucket built with [golang.org/x/time/rate](https://pkg.go.dev/golang.org/x/time/rate), the same way [kataras/httpclient](https://github.com/kataras/httpclient) paces its requests.
-
-Requests are spread across the minute, with a burst of one second's worth (20 at the default). Tokens are estimated from the body size before the call and settled with `usage.input_tokens` after it, so the estimate corrects itself. When the server does answer 429 or 529 with `Retry-After`, every caller on that limiter pauses until then, not only the call that saw it. The pause is capped by `RetryPolicy.MaxRetryAfter`, 60s by default.
-
-The limits are per account, so clients on the same key should share one limiter:
-
-```go
-shared := jev.NewLimiter(jev.DefaultRateLimit())
-latest, err := jev.New(jev.WithRateLimiter(shared))
-pinned, err := jev.New(jev.WithModel("jev-1.13.0"), jev.WithRateLimiter(shared))
-// or join an existing client's budget:
-third, err := jev.New(jev.WithRateLimiter(latest.Limiter()))
-```
-
-TypeSafe adjusts the limits without notice, and enterprise plans get higher ones. Set your own figures, or divide the account's budget between processes:
-
-```go
-client, err := jev.New(jev.WithRateLimit(jev.RateLimit{
-    RequestsPerMinute: 300,
-    TokensPerSecond:   60_000,
-}))
-```
-
-A zero field disables that axis. `jev.WithRateLimit(jev.RateLimit{})` or `jev.WithRateLimiter(nil)` turns pacing off. A plain `*rate.Limiter` also satisfies `jev.Limiter`; it paces requests only.
-
-The limiter waits are not retries. A wait that outlives your context returns that context's error, and no request is sent.
-
-## Errors
-
-```go
-if errors.Is(err, context.Canceled) {
-    // the caller cancelled; this is not retried
-}
-if errors.Is(err, jev.ErrUnauthorized) {
-    // HTTP 401
-}
-if errors.Is(err, jev.ErrRateLimited) {
-    // HTTP 429, after retries
-}
-if errors.Is(err, jev.ErrOverloaded) {
-    // HTTP 529; this also matches jev.ErrServer
-}
-var api *jev.APIError
-if errors.As(err, &api) {
-    fmt.Println(api.Status, api.RequestID, api.Message)
-}
-```
-
-| Sentinel | When |
+| Variable | Purpose |
 | --- | --- |
-| `ErrConfig` | Missing key, bad URL, bad option |
-| `ErrRequest` | Rejected locally, before HTTP |
-| `ErrResponse` | 2xx body that does not match the contract |
-| `ErrTimeout` | The per-attempt timeout fired |
-| `ErrConnection` | DNS, TLS, or a dropped connection |
-| `ErrBadRequest` | HTTP 400 |
-| `ErrUnauthorized` | HTTP 401 |
-| `ErrForbidden` | HTTP 403 |
-| `ErrNotFound` | HTTP 404 |
-| `ErrUnprocessable` | HTTP 422 |
-| `ErrRateLimited` | HTTP 429 |
-| `ErrOverloaded` | HTTP 529 |
-| `ErrServer` | HTTP 5xx, including 529 |
+| `TYPESAFE_API_KEY` | Required for ranking; put it in `.env` |
+| `BASHAI_CONFIG` | Config file path |
+| `BASHAI_ENV_FILE` | Env file path |
+| `BASHAI_HOST` | Host line; wins over config and detection |
+| `BASHAI_VIM` | `1` enables vim keybindings |
 
-A deadline on the context you passed is returned as that context error. It does not match `ErrTimeout`. `ErrTimeout` means this client's own per-attempt limit.
+## The library
 
-## Retries
+`bashai` is built on `github.com/kataras/jev`, a Go client for the TypeSafe
+System One API. If you want the classification layer in your own program, the API
+docs are on [pkg.go.dev](https://pkg.go.dev/github.com/kataras/jev) and there is
+an agent skill in [skills/jev/SKILL.md](skills/jev/SKILL.md).
 
-The default policy matches the official JavaScript SDK. It retries HTTP 408, 429, and 500 through 599, including 529. The first wait is 500ms, doubled up to 5s, with up to 25% of the wait subtracted at random. `Retry-After-Ms` is preferred over `Retry-After`. A server delay longer than 60s falls back to that backoff. Retries are the second line; the [rate limiter](#rate-limits) is the first.
+The short version — send a state and named questions, get a probability for each:
 
-There is no budget across attempts unless you set `RetryPolicy.MaxElapsed`. The context you pass always applies. Cancellation during a wait stops the call and is not retried.
-
-POST is retried because a System One call only evaluates. Each attempt still spends input tokens.
-
-## Logging
-
-`TYPESAFE_LOG_LEVEL` may be `debug`, `info`, `warn`, `error`, or `off`. Info logs one line per attempt. Debug also logs headers and bodies. `Authorization`, `Cookie`, and `X-Api-Key` are replaced with `[redacted]`. Bodies are logged as sent, and they contain your state.
-
-## Wire format
-
-A few choices differ from other Go clients, on purpose:
-
-- JSON is encoded with `encoding/json/v2`, and `<`, `>`, and `&` are left as themselves. `encoding/json` rewrites them to `\u003c`, `\u003e`, and `\u0026`, so the text the model reads is not the text you passed.
-- Object keys are sorted. The same request produces the same bytes.
-- `Request.Extra` cannot replace `state`, `model`, or `questions`.
-- A `[]byte` state is sent as a JSON string. A plain byte slice would otherwise be base64.
-- Score criteria must be a JSON array. A map is rejected. That matches the official SDK change in v0.6.0 (15 Sep 2026).
-- Choice criteria must be a JSON object, with at most 255 options.
-
-## Live tests
-
-`TestLiveSystemOne` and `TestLiveModels` call the real API and spend tokens. `go test` skips them when `TYPESAFE_API_KEY` is unset or blank, and always under `go test -short`. Every other test runs against an in-process server and needs no key.
-
-For GitHub Actions, add a repository secret named `TYPESAFE_API_KEY`. The workflow runs the unit tests without the key, then runs `-run '^TestLive'` only when the secret is present. Pull requests from forks do not receive secrets, so there the live step prints a note and passes. Do not commit a key.
-
-## Agent skill
-
-[skills/jev/SKILL.md](skills/jev/SKILL.md) is an Agent Skill for this module. The signatures in it match the Go API above. Claude Code, Cursor, Codex, and Plexon all read that format.
-
-Install it for every agent this machine already has, including Plexon (it adopts `~/.agents/skills`):
-
-```sh
-npx skills add kataras/jev --skill jev -g -y
-```
-
-One project only: drop `-g`. The files land in `.agents/skills/jev` or `.claude/skills/jev`. Plexon reads both.
-
-Pick agents by name when you do not want the full set:
-
-```sh
-npx skills add kataras/jev --skill jev -g -y -a claude-code -a cursor -a codex
-```
-
-Claude Code can install the same skill as a plugin. Inside a Claude Code session:
-
-```text
-/plugin marketplace add kataras/jev
-/plugin install jev@kataras-jev
+```go
+client, err := jev.New()
+answer, err := client.Classify(ctx, state, "Which team should handle this?", map[string]any{
+    "billing":   "Payments, invoices, refunds",
+    "technical": nil,
+})
+// answer.Choice, answer.Confidence, answer.Probabilities
 ```
 
 ## License
