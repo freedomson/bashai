@@ -108,7 +108,7 @@ no scores: TYPESAFE_API_KEY is not set, commands are unranked
 
 ## Adding the decision model
 
-The ranking comes from a jev-compatible server — Ollay — serving a decision model
+The ranking comes from a jev-compatible server — [Ollay](https://ollaya.dev/) — serving a decision model
 such as `kev` on port 11435. Start it, then tell `bashai` where it is:
 
 ```json
