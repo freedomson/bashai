@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/chzyer/readline"
@@ -646,6 +647,10 @@ type model struct {
 	selected    *commandItem
 	recommended int
 	sizeApplied bool
+	// editing state
+	editing   bool
+	editor    textinput.Model
+	editedCmd string
 }
 
 func newList(items []commandItem) list.Model {
@@ -774,11 +779,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// --- editing mode --------------------------------------------------
+		if m.editing {
+			switch msg.String() {
+			case "enter":
+				m.editedCmd = m.editor.Value()
+				m.editing = false
+				m.selected = &commandItem{cmd: m.editedCmd}
+				return m, tea.Quit
+			case "esc":
+				m.editing = false
+				m.editor.Blur()
+				// Re-focus the list item the user was on.
+				m.list.SetShowStatusBar(true)
+				m.list.SetShowPagination(true)
+				m.list.SetShowHelp(false)
+				m.list.SetShowFilter(false)
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.editor, cmd = m.editor.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// --- normal list mode ---------------------------------------------
 		switch msg.String() {
 		case "enter":
-			if item, ok := m.list.SelectedItem().(commandItem); ok && item.special != "spacer" {
-				m.selected = &item
-				return m, tea.Quit
+			if item, ok := m.list.SelectedItem().(commandItem); ok && item.special != "spacer" && item.special != "new" && item.special != "cancel" {
+				// Start editing the command.
+				m.editing = true
+				m.editor = textinput.New()
+				m.editor.Placeholder = "edit command"
+				m.editor.Cursor.Style = lipgloss.NewStyle().Background(lipgloss.Color("63"))
+				m.editor.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
+				m.editor.Prompt = lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Render("✎ ")
+				m.editor.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
+				m.editor.SetValue(item.cmd)
+				m.editor.Focus()
+				// Hide list chrome so the editor has room to render cleanly.
+				m.list.SetShowStatusBar(false)
+				m.list.SetShowPagination(false)
+				m.list.SetShowHelp(false)
+				m.list.SetShowFilter(false)
+				return m, nil
 			}
 			return m, nil
 		case "esc", "q":
@@ -803,6 +847,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.editing {
+		// Render the list dimmed underneath, then overlay the editor.
+		// Place the editor roughly in the middle of the viewport.
+		top := (m.list.Height() - 3) / 2
+		ed := lipgloss.NewStyle().
+			Padding(top, 0, top, 2).
+			Background(lipgloss.Color("237")).
+			Width(m.list.Width())
+		edStr := ed.Render(m.editor.View() + "\n\n" +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("enter confirm · esc cancel"))
+		return lipgloss.NewStyle().Width(m.list.Width()).Render(
+			m.list.View() + "\n" + edStr,
+		)
+	}
 	return m.list.View()
 }
 
