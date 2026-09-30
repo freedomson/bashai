@@ -234,8 +234,10 @@ $env:BASHAI_HOST = "windows/$env:PROCESSOR_ARCHITECTURE, $((Get-CimInstance Win3
 | Key | Action |
 | --- | --- |
 | `↑` `↓` | Move |
-| `Enter` | Run the selected command |
-| `Esc`, `q` | Quit |
+| `Enter` on a command | Edit the command inline (confirm with `Enter`, cancel with `Esc`) |
+| `Enter` on `➕ Ask Another Question` | Return to the query prompt |
+| `Enter` on `❌ Cancel & Exit` | Quit the program |
+| `Esc`, `q` | Quit the picker |
 
 At the query prompt, `↑`/`↓` browse history, which persists between sessions, and
 `Ctrl+R` searches it. Set `"vim_mode": true` for vim keybindings; there, arrow
