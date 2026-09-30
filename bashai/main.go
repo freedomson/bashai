@@ -806,8 +806,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// --- normal list mode ---------------------------------------------
 		switch msg.String() {
 		case "enter":
-			if item, ok := m.list.SelectedItem().(commandItem); ok && item.special != "spacer" && item.special != "new" && item.special != "cancel" {
-				// Start editing the command.
+			if item, ok := m.list.SelectedItem().(commandItem); ok {
+				switch item.special {
+				case "new":
+					m.selected = &item
+					return m, tea.Quit
+				case "cancel":
+					m.selected = &item
+					return m, tea.Quit
+				case "spacer":
+					return m, nil
+				}
+				// --- regular command: start editing ------------------------
 				m.editing = true
 				m.editor = textinput.New()
 				m.editor.Placeholder = "edit command"
